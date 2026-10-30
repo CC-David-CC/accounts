@@ -1,18 +1,6 @@
 import {makeKey, publicJwk, sameKey, thumbprint, signJws, verifyJws, inspectJws, hash, requireThat, nowSeconds, validateTimes} from './crypto.mjs';
 export const CERT_TYPE='codi-identity+jwt';
 export const PROOF_TYPE='codi-request+jws';
-const requestPreferences=new WeakMap();
-export function icePreference(config){
-  const preference=config.rtc?.preference;
-  if(preference===undefined)return null;
-  requireThat(config.rtc.credentialMode==='session-turn/1'&&config.rtc.iceTransportPolicy==='relay'&&preference&&Object.keys(preference).length===3&&['version','allowed','preferred'].every(k=>Object.hasOwn(preference,k))&&preference.version==='codi-session-ice/1','Unsupported ICE preference capability');
-  requireThat(Array.isArray(preference.allowed)&&['["relay"]','["relay","all"]'].includes(JSON.stringify(preference.allowed))&&preference.allowed.includes(preference.preferred),'Invalid operator ICE preference');
-  return {version:preference.version,transport:preference.preferred};
-}
-export function bindRequestPreference(config){
-  const preference=icePreference(config);
-  requestPreferences.set(config.identity,preference?Object.freeze(preference):null);
-}
 export async function verifyIdentity(identity, policy, now=nowSeconds()) {
   requireThat(identity && typeof identity.sid==='string' && identity.sid.length<=80,'Invalid session id');
   requireThat(typeof identity.name==='string' && identity.name.length<=64,'Invalid display name');
@@ -59,29 +47,15 @@ export async function authenticatedRequest(policy, session, path, data) {
   requireThat(policy.mode==='server'&&typeof policy.apiBase==='string'&&policy.apiBase.length<=135&&/^\/(?:[A-Za-z0-9_-]+\/)*api\/v1$/.test(policy.apiBase),'Same-origin identity service is required');
   requireThat(['anonymous','auth','renew','logout'].some(route=>path===policy.apiBase+'/'+route),'Wrong authenticated API path');
   requireThat(data&&typeof data==='object'&&!Array.isArray(data)&&!Object.hasOwn(data,'ice_preference'),'Reserved ICE preference request field');
-  const preference=requestPreferences.get(policy);
-  const request=JSON.stringify(preference&&!path.endsWith('/logout')?{...data,ice_preference:preference}:data); // Exact signed bytes are sent unchanged.
+  const request=JSON.stringify(data); // The signed request bytes are sent unchanged.
   const ch=await requestJson(policy.apiBase+'/challenge',{key:session.public.key,path});
   const t=nowSeconds();
   const proof=await signJws({v:1,nonce:ch.nonce,iss:session.public.sid,
     aud:policy.issuer,method:'POST',path,iat:t,exp:t+60,request_sha256:await hash(request)},session.privateKey,PROOF_TYPE);
   return requestJson(path,{request,proof},session.token);
 }
-export function sessionTurnConfig(config,result,trust){
-  if(config.rtc?.credentialMode===undefined)return null;
-  requireThat(config.identity.mode==='server'&&config.rtc.credentialMode==='session-turn/1','Unsupported session ICE policy');
-  const rtc=result.rtc,now=nowSeconds();
-  const transport=icePreference(config)?.transport??(config.rtc.iceTransportPolicy===undefined?'relay':config.rtc.iceTransportPolicy);
-  requireThat(['all','relay'].includes(transport)&&rtc&&Object.keys(rtc).length===3&&rtc.iceTransportPolicy===transport&&Number.isSafeInteger(rtc.expiresAt)&&rtc.expiresAt>now&&rtc.expiresAt<=now+600&&rtc.expiresAt<=trust.claims.exp,'Invalid TURN credential lifetime or transport policy');
-  requireThat(Array.isArray(config.rtc.turnUrls)&&config.rtc.turnUrls.length>=1&&config.rtc.turnUrls.length<=4&&Array.isArray(rtc.iceServers)&&rtc.iceServers.length===1,'Invalid TURN endpoints');
-  const server=rtc.iceServers[0];
-  requireThat(server&&Object.keys(server).length===4&&JSON.stringify(server.urls)===JSON.stringify(config.rtc.turnUrls)&&server.credentialType==='password','TURN endpoint or credential profile changed');
-  requireThat(typeof server.username==='string'&&server.username.startsWith(rtc.expiresAt+':')&&server.username.length<=128&&typeof server.credential==='string'&&/^[A-Za-z0-9+/]{27}=$/.test(server.credential),'Invalid TURN credential');
-  return JSON.parse(JSON.stringify(rtc));
-}
 export async function beginSession(config, mode, name='', password='') {
   const policy=config.identity;
-  bindRequestPreference(config);
   requireThat(isSecureContext && crypto.subtle,'A secure context (localhost or HTTPS) is required');
   const key=await makeKey(); const sid=crypto.randomUUID();
   const session={privateKey:key.privateKey,public:{sid,sub:sid,name:'anon-'+sid.slice(0,8),kind:'anonymous',key:key.publicKey,certificate:null},trust:null};
@@ -95,7 +69,6 @@ export async function beginSession(config, mode, name='', password='') {
     const result=await authenticatedRequest(policy,session,path,data);
     requireThat(sameKey(result.identity.key,session.public.key),'Server changed the session key');
     const trust=await verifyIdentity(result.identity,policy);
-    session.rtc=sessionTurnConfig(config,result,trust);
     session.public=result.identity;session.token=result.session_token;
   }
   session.trust=await verifyIdentity(session.public,policy);
@@ -103,12 +76,10 @@ export async function beginSession(config, mode, name='', password='') {
   return session;
 }
 export async function renewSession(config, session) {
-  bindRequestPreference(config);
   const result=await authenticatedRequest(config.identity,session,config.identity.apiBase+'/renew',{});
   requireIdentityBinding(session.public,result.identity);
   const trust=await verifyIdentity(result.identity,config.identity);
-  const rtc=sessionTurnConfig(config,result,trust);
-  session.public=result.identity; session.trust=trust;session.rtc=rtc;
+  session.public=result.identity; session.trust=trust;
 }
 export async function logoutSession(config,session) {
   if(config.identity.mode==='server') await authenticatedRequest(config.identity,session,config.identity.apiBase+'/logout',{});
