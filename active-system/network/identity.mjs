@@ -58,7 +58,7 @@ export async function authenticatedRequest(policy, session, path, data) {
         aud:policy.issuer,method:'POST',path,iat:t,exp:t+60,request_sha256:await hash(request)},session.privateKey,PROOF_TYPE);
       return await requestJson(path,{request,proof},session.token);
     }catch(error){
-      const busy=error.status===503||(error.status===429&&/^(Password service busy|Account database busy)/.test(error.message));
+      const busy=[502,503,504].includes(error.status)||(error.status===429&&/^(Password service busy|Account database busy)/.test(error.message));
       if(!retrySignin||!busy||attempt>=19)throw error;
       await new Promise(resolve=>setTimeout(resolve,300+Math.random()*Math.min(1500,300+attempt*150)));
     }
