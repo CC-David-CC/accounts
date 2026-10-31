@@ -16,6 +16,24 @@ class GatewayAuthority:
         self.application = issuer if application is None else application
         self.audience, _ = context(issuer.c.origin, issuer.base_path)
 
+    def session_bucket(self, authorization):
+        """Identify a live in-memory session for admission, never for access.
+
+        The eventual authorization still verifies the one-use signature,
+        persisted session, account generation and requested operation.
+        Unknown tokens cannot choose another account's rate bucket.
+        """
+        if not isinstance(authorization,str) or not authorization.startswith('Codi '):
+            return None
+        token=authorization[5:]
+        if not token or len(token)>128:return None
+        issuer=self.issuer
+        with issuer.lock:
+            issuer.cleanup()
+            session=issuer.sessions.get(jose.digest(token))
+            if not session or session.get('kind')!='registered' or session.get('deadline',0)<=issuer.now():return None
+            return session['sub']
+
     def challenge(self, data):
         issuer = self.issuer
         if not isinstance(data, dict) or set(data) != {'key','path'} or data['path'] != issuer.base_path + AUTHORIZE:
@@ -68,11 +86,14 @@ class GatewayAuthority:
             length = env.get('CONTENT_LENGTH','')
             if not length.isascii() or not length.isdecimal() or len(length) > 5 or not 0 < int(length) <= 16384:
                 raise Failure(413, 'Bounded gateway authorization request required')
-            # File operations must not spend the login/anonymous-bootstrap
-            # budget. Each file-auth phase retains the issuer's bounded rate;
-            # rotating request keys cannot evade its transport-level bucket.
-            purpose='file-challenge-ip:' if path==CHALLENGE else 'file-authorize-ip:'
-            issuer.throttle(purpose + env.get('REMOTE_ADDR','unknown'))
+            # A secret, live registered session selects an account budget;
+            # it is admission only, not permission to issue a file grant.
+            # Legacy/no-token callers retain a bounded transport budget.
+            # A second server-wide cap bounds aggregate work from valid users.
+            phase='challenge' if path==CHALLENGE else 'authorize'
+            subject=self.session_bucket(env.get('HTTP_AUTHORIZATION',''))
+            issuer.throttle(('file-'+phase+'-account:'+subject) if subject else ('file-'+phase+'-legacy:'+env.get('REMOTE_ADDR','unknown')))
+            issuer.throttle('file-'+phase+'-global',limit=20*issuer.c.rate_per_minute)
             raw = env['wsgi.input'].read(int(length))
             if len(raw) != int(length):
                 raise Failure(400, 'Truncated request')
