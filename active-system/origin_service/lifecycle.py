@@ -3,7 +3,7 @@
 Only the HTTP issuer observes this policy. Already issued detached certificates
 remain verifiable until expiry; this is not instant offline peer revocation.
 """
-import json,os,re,secrets,sqlite3,stat,sys,time,uuid
+import json,os,re,secrets,sqlite3,stat,sys,threading,time,uuid
 from contextlib import closing
 from argon2 import PasswordHasher,extract_parameters
 from argon2.low_level import Type
@@ -17,6 +17,11 @@ from origin_service.mount import validate_base_path
 from codiauth import jose
 SCHEMA='CREATE TABLE IF NOT EXISTS account_policy (subject TEXT PRIMARY KEY, disabled INTEGER NOT NULL CHECK(disabled IN (0,1)), generation INTEGER NOT NULL CHECK(generation>=0))'
 ACCOUNT_DB_TIMEOUT_SECONDS=2
+# Reserve half of the eight HTTP workers for other requests during login bursts.
+PASSWORD_ADMISSIONS=4
+PASSWORD_WAIT_SECONDS=3
+# Reverse-proxied issuer requests can share a loopback peer, including a whole classroom.
+ISSUER_PEER_REQUESTS_PER_MINUTE=1200
 def connection(path):return sqlite3.connect('file:'+quote(str(Path(path).absolute()),safe='/')+'?mode=rw',uri=True,timeout=ACCOUNT_DB_TIMEOUT_SECONDS)
 def policy(db,subject):
  row=db.execute('SELECT disabled,generation FROM account_policy WHERE subject=?',(subject,)).fetchone()
@@ -70,6 +75,7 @@ class Service(ReferenceService):
   self.maintenance_file=Path(maintenance_file) if maintenance_file is not None else None
   self.turn_policy=turn_policy
   super().__init__(config,clock)
+  self.password_admissions=threading.BoundedSemaphore(PASSWORD_ADMISSIONS)
   with closing(connection(self.db)) as db:
    db.execute('BEGIN IMMEDIATE');setup_policy(db)
    db.execute('CREATE TABLE IF NOT EXISTS registered_sessions (token_digest TEXT PRIMARY KEY, record TEXT NOT NULL, deadline INTEGER NOT NULL)')
@@ -88,6 +94,11 @@ class Service(ReferenceService):
     if jose.public_jwk(jose.load_public(session['key']))!=session['key']:raise ValueError('Invalid persisted session key')
     self.sessions[digest]=session
    db.commit()
+ def throttle(self,bucket,*,limit=None):
+  # The proxy can make many real clients share this transport address. Keep a
+  # bounded aggregate ceiling alongside the separate per-username limit.
+  if limit is None and bucket.startswith('ip:'):limit=ISSUER_PEER_REQUESTS_PER_MINUTE
+  return super().throttle(bucket,limit=limit)
  def account(self,data):
   # Keep the reference validation/hash policy, with one bounded transactional
   # account/policy write path instead of its ten-second SQLite fallback.
@@ -103,7 +114,10 @@ class Service(ReferenceService):
   maximum=128 if operation=='signin' else 32
   if not valid_password(password,maximum=maximum):raise Failure(400,'Password must be 4–'+str(maximum)+' characters without control characters')
   self.throttle('username:'+username)
-  if not self.hash_slots.acquire(blocking=False):raise Failure(429,'Password service busy')
+  if not self.password_admissions.acquire(blocking=False):raise Failure(429,'Password service busy; try again shortly')
+  if not self.hash_slots.acquire(timeout=PASSWORD_WAIT_SECONDS):
+   self.password_admissions.release()
+   raise Failure(429,'Password service busy; try again shortly')
   try:
    with closing(connection(self.db)) as db:
     db.execute('BEGIN IMMEDIATE')
@@ -132,7 +146,9 @@ class Service(ReferenceService):
   except sqlite3.OperationalError as error:
    if getattr(error,'sqlite_errorcode',0)&255 in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED):raise Failure(429,'Account database busy; retry later') from None
    raise
-  finally:self.hash_slots.release()
+  finally:
+   self.hash_slots.release()
+   self.password_admissions.release()
  def issue(self,session):
   if session['kind']!='registered':return self._signed_issue(session)
   # The read transaction holds the issuance decision through signing. An admin
