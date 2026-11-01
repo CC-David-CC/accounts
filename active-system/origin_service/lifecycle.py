@@ -120,7 +120,12 @@ class Service(ReferenceService):
    raise Failure(429,'Password service busy; try again shortly')
   try:
    with closing(connection(self.db)) as db:
-    db.execute('BEGIN IMMEDIATE')
+    try:db.execute('BEGIN IMMEDIATE')
+    except sqlite3.OperationalError as error:
+     # This marker is safe for a registration retry only when SQLite confirms
+     # that no transaction was entered and no account write was attempted.
+     if getattr(error,'sqlite_errorcode',0)&255 in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED) and not db.in_transaction:raise Failure(429,'Account admission busy; try again shortly') from None
+     raise
     row=db.execute('SELECT subject,password_hash FROM accounts WHERE username=?',(username,)).fetchone()
     if row:
      if operation=='register':raise Failure(400,'Username unavailable; choose another name or sign in')

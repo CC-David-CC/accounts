@@ -39,7 +39,7 @@ export async function verifyRenewedIdentity(previous,next,policy) {
 }
 async function requestJson(path, body, token=null) {
   const r=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',...(token?{Authorization:'Codi '+token}:{})},body:JSON.stringify(body),cache:'no-store',signal:AbortSignal.timeout(10000)});
-  let data; try { data=await r.json(); } catch { if(!r.ok)throw Object.assign(new Error('Service request failed ('+r.status+')'),{status:r.status});throw new Error('Invalid service response'); }
+  let data; try { data=await r.json(); } catch { if(!r.ok)throw Object.assign(new Error('Service request failed ('+r.status+')'),{status:r.status,preDispatch:r.status===503&&r.headers.get('X-Codi-Admission')==='pre-dispatch'});throw new Error('Invalid service response'); }
   if(!r.ok) throw Object.assign(new Error(data.error || 'Service request failed ('+r.status+')'),{status:r.status});
   return data;
 }
@@ -49,17 +49,26 @@ export async function authenticatedRequest(policy, session, path, data) {
   requireThat(data&&typeof data==='object'&&!Array.isArray(data)&&!Object.hasOwn(data,'ice_preference'),'Reserved ICE preference request field');
   const request=JSON.stringify(data); // The signed request bytes are sent unchanged.
   const retrySignin=path===policy.apiBase+'/auth'&&data.operation==='signin';
+  const retryRegisterAdmission=path===policy.apiBase+'/auth'&&data.operation==='register';
   for(let attempt=0;;attempt++){
+    let submitted=false;
     try{
       // Every attempt obtains a new single-use challenge and signs it anew.
       const ch=await requestJson(policy.apiBase+'/challenge',{key:session.public.key,path});
       const t=nowSeconds();
       const proof=await signJws({v:1,nonce:ch.nonce,iss:session.public.sid,
         aud:policy.issuer,method:'POST',path,iat:t,exp:t+60,request_sha256:await hash(request)},session.privateKey,PROOF_TYPE);
-      return await requestJson(path,{request,proof},session.token);
+      submitted=true;return await requestJson(path,{request,proof},session.token);
     }catch(error){
-      const busy=[502,503,504].includes(error.status)||(error.status===429&&/^(Password service busy|Account database busy)/.test(error.message));
-      if(!retrySignin||!busy||attempt>=19)throw error;
+      const busy=[502,503,504].includes(error.status)||(error.status===429&&/^(Password service busy|Account (?:database|admission) busy)/.test(error.message));
+      // These exact 429s are emitted only before account work or a transaction
+      // begins. A transport error may follow a committed registration.
+      const registrationAdmissionBusy=retryRegisterAdmission&&submitted&&error.status===429&&['Password service busy; try again shortly','Account admission busy; try again shortly'].includes(error.message);
+      const registrationBeforeDispatch=retryRegisterAdmission&&submitted&&error.status===503&&error.preDispatch===true;
+      // A challenge failure also precedes submission, so gateway errors at
+      // that stage cannot have created an account.
+      const registrationChallengeBusy=retryRegisterAdmission&&!submitted&&[502,503,504].includes(error.status);
+      if((!(retrySignin&&busy)&&!registrationAdmissionBusy&&!registrationBeforeDispatch&&!registrationChallengeBusy)||attempt>=19)throw error;
       await new Promise(resolve=>setTimeout(resolve,300+Math.random()*Math.min(1500,300+attempt*150)));
     }
   }

@@ -61,7 +61,7 @@ class BoundedServer(ThreadingMixIn, WSGIServer):
             # Never block the accept loop or create a worker for excess requests.
             try:
                 request.setblocking(False)
-                request.send(b'HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\nRetry-After: 1\r\n\r\n')
+                request.send(b'HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\nRetry-After: 1\r\nX-Codi-Admission: pre-dispatch\r\n\r\n')
             except OSError:
                 pass
             self.shutdown_request(request)
