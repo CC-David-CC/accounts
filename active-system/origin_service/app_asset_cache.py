@@ -13,6 +13,9 @@ from types import MappingProxyType
 CACHE_CONTROL = 'private, max-age=31536000, immutable'
 MAX_CATALOG_BYTES = 2 * 1024 * 1024
 MAX_FILES = 16384
+# Trusted installed software inventory; unrelated to visitor file/transfer quotas.
+MAX_APP_BYTES = 512 * 1024 * 1024
+MAX_ASSET_BYTES = 256 * 1024 * 1024
 SHA = re.compile(r'[a-f0-9]{64}')
 APP = re.compile(r'[a-z][a-z0-9-]{0,31}')
 FILE = re.compile(r'(?:[A-Za-z0-9_@+-][A-Za-z0-9_@+.-]*/)*[A-Za-z0-9_@+-][A-Za-z0-9_@+.-]*')
@@ -87,10 +90,10 @@ class RegisteredAppAssetCache:
                         or any(p in ('.', '..') for p in name.split('/'))
                         or type(record) is not dict or set(record) != {'sha256', 'bytes'}
                         or not isinstance(record['sha256'], str) or not SHA.fullmatch(record['sha256'])
-                        or type(record['bytes']) is not int or not 0 <= record['bytes'] <= 268435456):
+                        or type(record['bytes']) is not int or not 0 <= record['bytes'] <= MAX_ASSET_BYTES):
                     raise ValueError('Invalid app asset registration')
                 total_bytes += record['bytes']
-                if total_bytes > 335544320:
+                if total_bytes > MAX_APP_BYTES:
                     raise ValueError('App bundle exceeds limit')
                 target = self.root / (prefix + name)
                 try:
