@@ -14,6 +14,7 @@ ROOT=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(ROOT/'codiserver-server-v0.3.0'))
 from codiauth.service import Service as ReferenceService,Failure,PATHS
 from origin_service.mount import validate_base_path
+from origin_service.app_asset_cache import RegisteredAppAssetCache
 from codiauth import jose
 SCHEMA='CREATE TABLE IF NOT EXISTS account_policy (subject TEXT PRIMARY KEY, disabled INTEGER NOT NULL CHECK(disabled IN (0,1)), generation INTEGER NOT NULL CHECK(generation>=0))'
 ACCOUNT_DB_TIMEOUT_SECONDS=2
@@ -75,6 +76,7 @@ class Service(ReferenceService):
   self.maintenance_file=Path(maintenance_file) if maintenance_file is not None else None
   self.turn_policy=turn_policy
   super().__init__(config,clock)
+  self.app_asset_cache=RegisteredAppAssetCache(self.public_root)
   self.password_admissions=threading.BoundedSemaphore(PASSWORD_ADMISSIONS)
   with closing(connection(self.db)) as db:
    db.execute('BEGIN IMMEDIATE');setup_policy(db)
@@ -196,6 +198,13 @@ class Service(ReferenceService):
     if any(type(value[k]) is not int for k in ['deadline','expiresAt']) or not value['deadline']<=value['expiresAt']<=value['deadline']+86400 or not isinstance(value['message'],str) or not 1<=len(value['message'])<=500:raise ValueError('Invalid maintenance deadline/message')
     if value['expiresAt']>self.now():notice=value
   return {'version':'codi-desktop-status/1','epoch':self.desktop_epoch,'serverTime':self.now(),'maintenance':notice}
+ def static(self,path,start):
+  # The reference dispatcher admits only GET here (HeadSupport preserves GET
+  # headers for HEAD). All path/Host/authorization/error behavior stays there.
+  def asset_headers(status,headers,exc_info=None):
+   headers=self.app_asset_cache.response_headers(path,status,headers)
+   return start(status,headers) if exc_info is None else start(status,headers,exc_info)
+  return super().static(path,asset_headers)
  def __call__(self,env,start):
   if env.get('PATH_INFO')=='/assets/desktop/offline-worker.js':
    def worker_headers(status,headers,exc_info=None):return start(status,[*headers,('Service-Worker-Allowed',self.base_path+'/')],exc_info)
