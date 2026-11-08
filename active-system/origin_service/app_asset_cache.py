@@ -14,7 +14,7 @@ CACHE_CONTROL = 'private, max-age=31536000, immutable'
 MAX_CATALOG_BYTES = 2 * 1024 * 1024
 MAX_FILES = 16384
 # Trusted installed software inventory; unrelated to visitor file/transfer quotas.
-MAX_APP_BYTES = 512 * 1024 * 1024
+MAX_APP_BYTES = 1024 * 1024 * 1024
 MAX_ASSET_BYTES = 256 * 1024 * 1024
 SHA = re.compile(r'[a-f0-9]{64}')
 APP = re.compile(r'[a-z][a-z0-9-]{0,31}')
