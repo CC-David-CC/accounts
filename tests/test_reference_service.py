@@ -4,8 +4,8 @@ from pathlib import Path
 from dataclasses import replace
 from urllib.parse import urlsplit
 from cryptography.hazmat.primitives.asymmetric import ec
-from codiauth.service import Config,Service,CERT_TYPE,PROOF_TYPE
-from codiauth import jose
+from webos_accounts.service import Config,Service,CERT_TYPE,PROOF_TYPE
+from webos_accounts import jose
 PASSWORD='correct horse battery staple'
 
 class ServiceTests(unittest.TestCase):

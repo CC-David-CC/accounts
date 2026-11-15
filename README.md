@@ -44,3 +44,11 @@ Run `python -m unittest discover -s tests -v` in the component backend environme
 The delegation tests use real generated signing keys and synthetic retained
 account state, including concurrent consumption and existing account-policy
 revocation. They do not qualify end-to-end agent operation of the desktop.
+
+## Retained identity core and current policy checks
+
+The original42 identity-service tests now live at `tests/test_reference_service.py`, with their original test classes/assertions unchanged. They test the retained `webos_accounts.service.Service` core inside its owning repository. Their history was mechanically extracted before the import-only port. Four new tests separately exercise the current public AccountsService policy: current registration bounds and legacy long-password sign-in; concurrent registration across independent service instances without overwrite; separate username/proxy peer budgets; and persisted sessions with final logout. The complete layered suite passes67 tests (42 core,21 existing policy/delegation,4 current policy).
+
+The historical42-test suite against the public policy does not establish complete policy equivalence: four old assertions differ. Current registration accepts4–32-character passwords, the aggregate shared-proxy ceiling is1200 requests/minute, registered sessions persist across restart, and the old race fixture uses a password longer than the current registration maximum. These differences are recorded in private phase28 evidence, including the failed comparison. The old assertions were preserved; they were not weakened to qualify the current profile.
+
+Original source: `active-system/codiserver-server-v0.3.0/tests/test_service.py` at `4f72ea86928666189b32f6f05c2c697a37341d06`; earlier `desktop-preview/` history retained. Filtered baseline `dad40a136cc693b33562ea095d4b2f7fa05a908d`, mechanical merge `94fb54bad2169f8749dbaeca32c71d88b6c53ac7`. Private phase28 retains commit maps, exact blob/mode proof, baseline and old-source-hidden test commands. No production implementation or deployment changed.
