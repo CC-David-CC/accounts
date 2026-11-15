@@ -1,3 +1,6 @@
+import {FILE_PROTOCOL} from '@webos/runtime/file-protocol';
+import {hash, signJws, inspectJws, verifyJws, sameKey, validateTimes, nowSeconds} from './crypto.mjs';
+import {verifyIdentity, PROOF_TYPE} from './identity.mjs';
 import {beginSession, logoutSession, renewSession} from './identity.mjs';
 
 /** One account authority per runtime; only this closure holds session credentials. */
@@ -52,6 +55,43 @@ export function createAccountsClient({configUrl = '/config.json'} = {}) {
       if (!previous) return {status: 'signed-out'};
       try { await logoutSession(config, previous); return {status: 'signed-out'}; }
       catch { throw Object.assign(Error('Signed out on this device; server revocation could not be confirmed.'), {outcome: 'unknown'}); }
+    },
+    createFileAuthority() {
+      if (!session || phase !== 'authenticated') throw Error('Sign in to access account files.');
+      const bound = session, version = epoch, policy = config.identity;
+      const basePath = config.gateway?.basePath;
+      if (config.gateway?.version !== 'codi-user-files/1' || basePath !== policy.apiBase.slice(0, -7) + '/gateway') throw Error('Account files are unavailable.');
+      const check = () => { if (session !== bound || epoch !== version || phase !== 'authenticated') throw new DOMException('Account changed.', 'AbortError'); };
+      const post = async (path, body) => {
+        check(); const response = await fetch(path, {method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+          headers: {'Content-Type': 'application/json', Authorization: 'Codi ' + bound.token}, body: JSON.stringify(body), signal: AbortSignal.timeout(10000)});
+        const text = await response.text(); check(); if (text.length > 32768) throw Error('File authorization response too large.');
+        let value;try { value = JSON.parse(text); } catch { throw Error('Invalid file authorization response.'); }
+        if (!response.ok) throw Object.assign(Error(value.error || 'File authorization refused.'), {status: response.status});
+        return value;
+      };
+      return Object.freeze({owner: bound.public.sub, sessionId: bound.public.sid, actorKind: 'human',
+        publicKey: Object.freeze({...bound.public.key}), basePath, check,
+        async authorize(nonce, requestSha) {
+          check(); if (![nonce, requestSha].every(value => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value))) throw Error('Bounded file authorization context required.');
+          await verifyIdentity(bound.public, policy); check();
+          const path = policy.apiBase + '/gateway/authorize';
+          const challenge = await post(policy.apiBase + '/gateway/challenge', {key: bound.public.key, path});
+          const request = JSON.stringify({nonce, request_sha256: requestSha}), now = nowSeconds();
+          const proof = await signJws({v: 1, nonce: challenge.nonce, iss: bound.public.sid, aud: policy.issuer,
+            method: 'POST', path, iat: now, exp: now + 60, request_sha256: await hash(request)}, bound.privateKey, PROOF_TYPE);
+          const result = await post(path, {request, proof});
+          const header = inspectJws(result.confirmation, FILE_PROTOCOL.confirmationType, 8192).header;
+          const issuer = policy.authorityKeys.find(key => key.kid === header.kid); if (!issuer) throw Error('Unknown file authorization authority.');
+          const grant = await verifyJws(result.confirmation, issuer.jwk, FILE_PROTOCOL.confirmationType, 8192); validateTimes(grant, FILE_PROTOCOL.grantLifetimeSeconds);
+          const audience = location.origin + basePath;
+          if (grant.v !== 1 || grant.iss !== policy.issuer || grant.aud !== audience || grant.sid !== bound.public.sid || grant.sub !== bound.public.sub || grant.kind !== 'registered' ||
+              !sameKey(grant.cnf?.jwk, bound.public.key) || grant.nonce !== nonce || grant.request_sha256 !== requestSha) throw Error('File authorization binding changed.');
+          check(); const use = await signJws({v: 1, iss: bound.public.sid, aud: audience, nonce,
+            grant_sha256: await hash(result.confirmation), request_sha256: requestSha, method: 'POST', path: basePath + '/use', iat: grant.iat, exp: grant.exp}, bound.privateKey, FILE_PROTOCOL.useType);
+          check(); return 'Codi-File ' + result.confirmation + ' ' + use;
+        }
+      });
     },
     async renew() {
       await ready; const previous = session, version = epoch;

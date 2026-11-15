@@ -6,11 +6,11 @@ The native launcher enables this explicitly; it is off by default.
 """
 import secrets
 from urllib.parse import urlsplit
-from codiauth import jose
-from codiauth.service import Failure
-from gateway_service.auth import AUTHORIZE, CHALLENGE, CONFIRMATION_TYPE, LIFETIME, context, digest
+from . import jose
+from .service import Failure
+from webos_runtime.file_protocol import AUTHORIZE, CHALLENGE, CONFIRMATION_TYPE, LIFETIME, gateway_context as context, canonical_digest as digest
 
-class GatewayAuthority:
+class FileAuthority:
     def __init__(self, issuer, application=None):
         self.issuer = issuer
         self.application = issuer if application is None else application
