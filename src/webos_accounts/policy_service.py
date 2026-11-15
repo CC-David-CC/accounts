@@ -10,12 +10,10 @@ from argon2.low_level import Type
 from argon2.exceptions import InvalidHashError,VerifyMismatchError,VerificationError
 from pathlib import Path
 from urllib.parse import quote,urlsplit
-ROOT=Path(__file__).resolve().parent.parent
-sys.path.insert(0,str(ROOT/'codiserver-server-v0.3.0'))
-from codiauth.service import Service as ReferenceService,Failure,PATHS
-from origin_service.mount import validate_base_path
-from origin_service.app_asset_cache import RegisteredAppAssetCache
-from codiauth import jose
+from .service import Service as ReferenceService,Failure,PATHS
+from .mount import validate_base_path
+from .app_asset_cache import RegisteredAppAssetCache
+from . import jose
 SCHEMA='CREATE TABLE IF NOT EXISTS account_policy (subject TEXT PRIMARY KEY, disabled INTEGER NOT NULL CHECK(disabled IN (0,1)), generation INTEGER NOT NULL CHECK(generation>=0))'
 ACCOUNT_DB_TIMEOUT_SECONDS=2
 # Reserve half of the eight HTTP workers for other requests during login bursts.
@@ -171,12 +169,13 @@ class Service(ReferenceService):
    session['_account_generation']=generation
    return self._signed_issue(session)
  def config(self):
-  config=super().config()
+  reference=super().config()
+  # Account discovery is independent of guest engines and peer transports.
+  # Keep the identity wire format while advertising only this service's API.
+  config={'protocol':reference['protocol'],'identity':reference['identity']}
   config['identity']['apiBase']=self.base_path+'/api/v1'
   config['accounts']={'actions':['register','signin']}
-  config['vm']['manifest']=self.base_path+'/vm/manifest.json'
   config['desktopLifecycle']={'version':'codi-desktop-lifecycle/1','statusPath':self.base_path+'/api/v1/desktop-status'}
-  if self.turn_policy is not None:config['rtc']=self.turn_policy.public_config()
   return config
  def desktop_status(self):
   notice=None
