@@ -1,4 +1,4 @@
-import {strictJson} from './strict-json.mjs';
+import {strictJson} from '@webos/runtime/strict-json';
 /** Narrow ES256 JWS profile, not a general JOSE implementation.
  * Standard cryptographic primitives are provided by Web Crypto, never JS math.
  * Sign the transmitted base64url bytes; never reserialize received signed JSON.

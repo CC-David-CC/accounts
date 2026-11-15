@@ -84,7 +84,8 @@ export async function beginSession(config, mode, name='', password='') {
   } else {
     requireThat(policy.mode==='server','Unknown identity configuration');
     const path=policy.apiBase+(mode==='anonymous'?'/anonymous':'/auth');
-    const data=mode==='anonymous'?{}:{username:name,password};
+    requireThat(['anonymous','register','signin'].includes(mode),'Explicit account operation required');
+    const data=mode==='anonymous'?{}:{username:name,password,operation:mode};
     const result=await authenticatedRequest(policy,session,path,data);
     requireThat(sameKey(result.identity.key,session.public.key),'Server changed the session key');
     const trust=await verifyIdentity(result.identity,policy);

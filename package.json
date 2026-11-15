@@ -1,0 +1,14 @@
+{
+  "name": "@webos/accounts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./browser/client.mjs",
+    "./crypto": "./browser/crypto.mjs",
+    "./identity": "./browser/identity.mjs"
+  },
+  "dependencies": {
+    "@webos/runtime": "0.1.0"
+  }
+}
