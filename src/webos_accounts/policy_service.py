@@ -154,19 +154,37 @@ class Service(ReferenceService):
   finally:
    self.hash_slots.release()
    self.password_admissions.release()
+ def _check_account_session(self,session,db):
+  account=db.execute('SELECT username FROM accounts WHERE subject=?',(session['sub'],)).fetchone()
+  if account is None or account[0]!=session['name']:raise Failure(401,'Account no longer available')
+  try:disabled,generation=policy(db,session['sub'])
+  except ValueError:raise Failure(500,'Account policy unavailable')
+  if type(session.get('_account_generation')) is not int:raise Failure(500,'Session generation unavailable')
+  if disabled or session['_account_generation']!=generation:raise Failure(401,'Session revoked or account unavailable')
+  session['_account_generation']=generation
+ def _check_retained_token(self,db,token_digest):
+  if db.execute('SELECT 1 FROM registered_sessions WHERE token_digest=? AND deadline>?',(token_digest,self.now())).fetchone() is None:raise Failure(401,'Session revoked')
+ def session_binding(self,token_digest,subject,sid):
+  """Internal liveness check for an already authenticated retained binding.
+
+  A digest is not a caller credential. This method issues no certificate or
+  grant; delegation records use it to recheck their previously verified owner.
+  """
+  with self.lock:
+   self.cleanup();session=self.sessions.get(token_digest)
+   if session is None or session['kind']!='registered' or session['sub']!=subject or session['sid']!=sid:raise Failure(401,'Owner session unavailable')
+   with closing(connection(self.db)) as db:
+    db.execute('BEGIN')
+    self._check_retained_token(db,token_digest)
+    self._check_account_session(session,db)
+   return {'sub':session['sub'],'sid':session['sid'],'deadline':session['deadline']}
  def issue(self,session):
   if session['kind']!='registered':return self._signed_issue(session)
   # The read transaction holds the issuance decision through signing. An admin
   # disable committing afterward cannot retroactively revoke that certificate.
   with closing(connection(self.db)) as db:
    db.execute('BEGIN')
-   account=db.execute('SELECT username FROM accounts WHERE subject=?',(session['sub'],)).fetchone()
-   if account is None or account[0]!=session['name']:raise Failure(401,'Account no longer available')
-   try:disabled,generation=policy(db,session['sub'])
-   except ValueError:raise Failure(500,'Account policy unavailable')
-   if type(session.get('_account_generation')) is not int:raise Failure(500,'Session generation unavailable')
-   if disabled or session['_account_generation']!=generation:raise Failure(401,'Session revoked or account unavailable')
-   session['_account_generation']=generation
+   self._check_account_session(session,db)
    return self._signed_issue(session)
  def config(self):
   reference=super().config()
@@ -260,8 +278,7 @@ class Service(ReferenceService):
    if session['kind']=='registered':
     with closing(connection(self.db)) as db:
      db.execute('BEGIN IMMEDIATE' if path.endswith('/logout') else 'BEGIN')
-     row=db.execute('SELECT 1 FROM registered_sessions WHERE token_digest=? AND deadline>?',(digest,self.now())).fetchone()
-     if row is None:raise Failure(401,'Session revoked')
+     self._check_retained_token(db,digest)
      if path.endswith('/logout'):db.execute('DELETE FROM registered_sessions WHERE token_digest=?',(digest,));db.commit()
    if path.endswith('/logout'):
     del self.sessions[digest];return {'logged_out':True}
