@@ -54,3 +54,49 @@ The historical42-test suite against the public policy does not establish complet
 Original source: `active-system/codiserver-server-v0.3.0/tests/test_service.py` at `4f72ea86928666189b32f6f05c2c697a37341d06`; earlier `desktop-preview/` history retained. Filtered baseline `dad40a136cc693b33562ea095d4b2f7fa05a908d`, mechanical merge `94fb54bad2169f8749dbaeca32c71d88b6c53ac7`. Private phase28 retains commit maps, exact blob/mode proof, baseline and old-source-hidden test commands. No production implementation or deployment changed.
 
 The stateless configuration helper `webos_accounts.mount.validate_base_path(value)` is also public. It returns an empty mount prefix or slash-separated ASCII names unchanged, with a128-character maximum; it raises ValueError for other values. Server components use this shared issuer mount convention without importing account/session internals. It neither reads credentials nor grants authority.
+
+## Browser sign-in retention
+
+`createAccountsClient({persistSession: true})` explicitly enables browser
+retention. Call `restore()` before presenting Login or opening account views.
+It returns public session metadata after a successful signed server renewal,
+or null for an absent, invalid or expired remembered login. A transient server/
+network failure rejects without erasing the record or admitting cached identity.
+The default remains memory-only for hosts that have not opted in.
+
+Accounts alone owns `webos-account-session-v1` IndexedDB records, scoped by
+same-origin issuer and API mount. They hold the registered session token, public
+identity metadata and a structured-cloned, nonextractable Web Crypto private key.
+The key is never exported; passwords are never retained. Restore verifies the
+stored key pair locally, proves possession to the existing server, verifies the
+fresh authority signature and checks the exact account/session/key binding.
+An expired cached certificate is not authority and does not prevent renewal of
+a still-valid server session. The existing eight-hour server deadline remains
+fixed; refresh/browser reopening does not extend it.
+
+Ordinary inspection adds only `retention`, a public status string. No token,
+private key or raw stored record is exposed by the client. Browser storage is
+best effort and can be cleared/evicted. If unavailable, an interactive login
+can work in the current tab with an explicit persistence warning; it does not
+promise that this login will be remembered. Same-origin trusted applications
+share browser authority; IndexedDB and nonextractable keys do not create an
+isolation boundary against such code or a compromised browser.
+
+Logout first confirms removal of its exact retained record, then revokes the
+server session. A local forget failure leaves sign-out retryable and the current
+session intact. An unknown server outcome leaves the credential forgotten so
+refresh cannot silently restore it. Conditional record deletion prevents an old
+tab from erasing a newer account's remembered login. Restore rechecks that its
+record is still current after the network wait; it cannot install an obsolete
+account over a concurrent sign-out/login. Renewal never rewrites retained
+credentials. Open tabs do not silently switch accounts; the server continues to
+authorize their operations, and the next page load uses the current remembered
+login. Explicit sign-out invalidates other tabs sharing that server session.
+
+The parent `tests/accounts_persistence_browser.mjs` uses real Login, Chromium
+profile restart, IndexedDB/CryptoKey and signed Accounts HTTP. It covers corrupted
+records, mismatched keys/accounts, transient renewal failures, expired private
+fixture sessions, concurrent tabs and uncertain logout. The parent desktop
+suite additionally checks actual Files/Text and draft recovery. Its synthetic
+expiry changes only its own disposable SQLite state, never a hosted account.
+No Python issuer, stored-account format or backend deployment changes are needed.

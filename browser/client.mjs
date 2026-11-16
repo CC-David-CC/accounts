@@ -1,18 +1,21 @@
 import {FILE_PROTOCOL} from '@webos/runtime/file-protocol';
-import {hash, signJws, inspectJws, verifyJws, sameKey, validateTimes, nowSeconds} from './crypto.mjs';
+import {hash, signJws, inspectJws, verifyJws, sameKey, publicJwk, validateTimes, nowSeconds} from './crypto.mjs';
 import {verifyIdentity, PROOF_TYPE} from './identity.mjs';
-import {beginSession, logoutSession, renewSession} from './identity.mjs';
+import {beginSession, logoutSession, renewSession, resumeSession} from './identity.mjs';
+import {createSessionStore} from './session-store.mjs';
 
 /** One account authority per runtime; only this closure holds session credentials. */
-export function createAccountsClient({configUrl = '/config.json'} = {}) {
+export function createAccountsClient({configUrl = '/config.json', persistSession = false} = {}) {
+  if (typeof persistSession !== 'boolean') throw TypeError('Explicit browser sign-in retention setting required.');
   const url = new URL(configUrl, location.href);
   if (url.origin !== location.origin) throw Error('Same-origin account discovery is required.');
-  let config, session = null, epoch = 0, phase = 'initializing';
+  let config, session = null, epoch = 0, phase = 'initializing', store, recordId = null,
+    retention = persistSession ? 'empty' : 'disabled';
   const listeners = new Set();
   const inspect = () => Object.freeze({phase, epoch,
     accountId: session?.public.sub ?? null, sessionId: session?.public.sid ?? null,
     displayName: session?.public.name ?? null, expiresAt: session?.trust.claims?.exp ?? null,
-    trust: session?.trust.level ?? null});
+    trust: session?.trust.level ?? null, retention});
   const notify = () => { const value = inspect(); for (const listener of listeners) { try { listener(value); } catch {} } };
   const ready = (async () => {
     try {
@@ -23,12 +26,52 @@ export function createAccountsClient({configUrl = '/config.json'} = {}) {
       if (config?.identity?.mode !== 'server' || config.identity.issuer !== location.origin ||
           !Array.isArray(config.identity.authorityKeys) || !Array.isArray(config.accounts?.actions) ||
           !['register', 'signin'].every(action => config.accounts.actions.includes(action))) throw Error('Invalid authoritative account discovery.');
+      if (persistSession) store = createSessionStore(config.identity.issuer + config.identity.apiBase);
       phase = 'signed-out'; notify();
     } catch (failure) { phase = 'failed'; notify(); throw failure; }
   })();
   ready.catch(() => {});
+  function validRecord(record) {
+    try { publicJwk(record?.identity?.key); } catch { return false; }
+    return record?.version === 1 && typeof record.id === 'string' && record.id.length > 0 && record.id.length <= 64 &&
+      typeof record.token === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(record.token) &&
+      record.privateKey instanceof CryptoKey && !record.privateKey.extractable && record.privateKey.type === 'private' &&
+      record.privateKey.algorithm.name === 'ECDSA' && record.privateKey.algorithm.namedCurve === 'P-256' &&
+      record.privateKey.usages.includes('sign') && record.identity?.kind === 'registered' &&
+      typeof record.identity.sid === 'string' && record.identity.sid.length <= 80 &&
+      typeof record.identity.sub === 'string' && record.identity.sub.length <= 80 && record.identity.sub.startsWith('user:') &&
+      typeof record.identity.name === 'string' && record.identity.name.length <= 64 &&
+      typeof record.identity.certificate === 'string' && record.identity.certificate.length <= 16384;
+  }
+  async function removeRecord(id) {
+    if (!store || id === null) return;
+    try { await store.remove(id); retention = 'empty'; }
+    catch { retention = 'unavailable'; throw Error('Could not forget this browser sign-in. Retry sign-out before closing.'); }
+  }
   return Object.freeze({
     ready, inspect,
+    async restore() {
+      await ready;
+      if (session || ['authenticating','restoring'].includes(phase)) throw Error('An account operation is already active.');
+      if (!store) return null;
+      const version = ++epoch; phase = 'restoring'; notify();
+      let record;
+      try { record = await store.read(); }
+      catch { retention = 'unavailable'; phase = 'signed-out'; notify(); return null; }
+      try {
+        if (!record) { retention = 'empty'; return null; }
+        if (!validRecord(record)) { await removeRecord(record.id); retention = 'invalid'; return null; }
+        const next = await resumeSession(config, record);
+        if (version !== epoch || (await store.read())?.id !== record.id) throw new DOMException('Remembered sign-in changed.', 'AbortError');
+        session = next; recordId = record.id; retention = 'retained'; phase = 'authenticated'; notify(); return inspect();
+      } catch (failure) {
+        if (version !== epoch) throw failure;
+        if ([401,403].includes(failure.status) || failure.invalidRetained) { await removeRecord(record.id); retention = failure.invalidRetained ? 'invalid' : 'expired'; return null; }
+        // A timeout, offline browser or unavailable server must not erase the
+        // credential or admit the cached identity as authenticated.
+        throw failure;
+      } finally { if (version === epoch && !session) { phase = 'signed-out'; notify(); } }
+    },
     subscribe(listener) {
       if (typeof listener !== 'function') throw TypeError('Account listener required.');
       listeners.add(listener); return () => listeners.delete(listener);
@@ -36,7 +79,7 @@ export function createAccountsClient({configUrl = '/config.json'} = {}) {
     async authenticate({mode, username, password}, {signal} = {}) {
       await ready;
       if (!['register', 'signin'].includes(mode)) throw Error('Choose sign in or register.');
-      if (session || phase === 'authenticating') throw Error('An account session or sign-in operation is already active.');
+      if (session || ['authenticating','restoring'].includes(phase)) throw Error('An account session or sign-in operation is already active.');
       if (signal?.aborted) throw new DOMException('Sign in cancelled.', 'AbortError');
       const attempt = ++epoch; phase = 'authenticating'; notify();
       try {
@@ -47,11 +90,26 @@ export function createAccountsClient({configUrl = '/config.json'} = {}) {
         if (signal?.aborted || attempt !== epoch) {
           await logoutSession(config, next).catch(() => {}); throw new DOMException('Sign in cancelled.', 'AbortError');
         }
+        if (store) {
+          const id = crypto.randomUUID();
+          try {
+            await store.write({version:1,id,identity:next.public,privateKey:next.privateKey,token:next.token});
+            recordId = id; retention = 'retained';
+          } catch { retention = 'unavailable'; }
+          if (signal?.aborted || attempt !== epoch) {
+            await removeRecord(id).catch(() => {}); await logoutSession(config,next).catch(() => {});
+            throw new DOMException('Sign in cancelled.', 'AbortError');
+          }
+        }
         session = next; phase = 'authenticated'; notify(); return inspect();
       } catch (failure) { if (attempt === epoch && !session) { phase = 'signed-out'; notify(); } throw failure; }
     },
     async logout() {
-      await ready; const previous = session; ++epoch; session = null; phase = 'signed-out'; notify();
+      await ready; const previous = session;
+      // Forget locally before revocation; a failed network response cannot
+      // cause the next refresh to restore the session the user ended.
+      await removeRecord(recordId); recordId = null;
+      ++epoch; session = null; phase = 'signed-out'; notify();
       if (!previous) return {status: 'signed-out'};
       try { await logoutSession(config, previous); return {status: 'signed-out'}; }
       catch { throw Object.assign(Error('Signed out on this device; server revocation could not be confirmed.'), {outcome: 'unknown'}); }

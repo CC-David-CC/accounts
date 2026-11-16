@@ -101,6 +101,27 @@ export async function renewSession(config, session) {
   const trust=await verifyIdentity(result.identity,config.identity);
   session.public=result.identity; session.trust=trust;
 }
+/** A stored certificate is navigation metadata, not proof of a current login. */
+export async function resumeSession(config, stored) {
+  const session={privateKey:stored.privateKey,public:stored.identity,token:stored.token,trust:null};
+  // Detect a corrupt/mismatched stored key locally, rather than repeatedly
+  // sending an invalid proof and treating the server's400 as a transient fault.
+  try {
+    const nonce=crypto.getRandomValues(new Uint8Array(32));
+    const key=await crypto.subtle.importKey('jwk',publicJwk(session.public.key),{name:'ECDSA',namedCurve:'P-256'},false,['verify']);
+    const signature=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},session.privateKey,nonce);
+    requireThat(await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},key,signature,nonce),'Stored key mismatch');
+  } catch { throw Object.assign(Error('Remembered account key is invalid.'),{invalidRetained:true}); }
+  // The signed renew request proves possession of the original bound key/token.
+  // It works after the short certificate expires; the server session deadline,
+  // revocation and account policy remain authoritative.
+  const result=await authenticatedRequest(config.identity,session,config.identity.apiBase+'/renew',{});
+  try { requireIdentityBinding(session.public,result.identity); }
+  catch { throw Object.assign(Error('Remembered account binding changed.'),{invalidRetained:true}); }
+  session.trust=await verifyIdentity(result.identity,config.identity);session.public=result.identity;
+  session.fingerprint=await thumbprint(session.public.key);
+  return session;
+}
 export async function logoutSession(config,session) {
   if(config.identity.mode==='server') await authenticatedRequest(config.identity,session,config.identity.apiBase+'/logout',{});
 }
