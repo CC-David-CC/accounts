@@ -37,6 +37,14 @@ invocation context bound to the admitted intent and current account epoch.
 Desktop still needs consent presentation, live command dispatch and an
 agent file authority. User-presence steps stay user-controlled.
 
+The browser Accounts client exposes an epoch-bound `createOperationAuthority()`
+when issuer discovery advertises `agentOperations.version` as
+`webos-agent-operations/1`. The capability approves, lists, revokes and consumes
+delegations under the current owner session. Approval returns the agent
+credential for handoff, and list/inspect omit credentials. Grants and exact
+intent are consumed through signed requests. The capability rejects calls after
+the account changes or signs out.
+
 These operation grants have a distinct type/audience and are rejected as
 file-gateway confirmations. Never use the existing human file authority to
 silently perform an agent's file operation. That integration and its server

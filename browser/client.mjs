@@ -151,6 +151,66 @@ export function createAccountsClient({configUrl = '/config.json', persistSession
         }
       });
     },
+    createOperationAuthority() {
+      if (!session || phase !== 'authenticated') throw Error('Sign in to approve delegated operations.');
+      const policy = config.identity;
+      if (config.agentOperations?.version !== 'webos-agent-operations/1' ||
+          typeof policy.apiBase !== 'string' || !/^\/(?:[A-Za-z0-9_-]+\/)*api\/v1$/.test(policy.apiBase)) {
+        throw Error('Delegated operations are unavailable.');
+      }
+      const bound = session;
+      const version = epoch;
+      const base = policy.apiBase + '/agents';
+      const check = () => {
+        if (session !== bound || epoch !== version || phase !== 'authenticated') {
+          throw new DOMException('Account changed.', 'AbortError');
+        }
+      };
+      async function post(path, body, authorization) {
+        check();
+        const payload = JSON.stringify(body);
+        if (new TextEncoder().encode(payload).length > 262144) throw Error('Operation authorization request too large.');
+        const response = await fetch(path, {
+          method: 'POST', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+          headers: {'Content-Type': 'application/json', ...(authorization ? {Authorization: authorization} : {})},
+          body: payload, signal: AbortSignal.timeout(10000),
+        });
+        const text = await response.text();
+        check();
+        if (text.length > 262144) throw Error('Operation authorization response too large.');
+        let result;
+        try { result = JSON.parse(text); } catch { throw Error('Invalid operation authorization response.'); }
+        if (!result || typeof result !== 'object' || Array.isArray(result)) throw Error('Invalid operation authorization response.');
+        if (!response.ok) throw Object.assign(Error(result.error || 'Operation authorization refused.'), {status: response.status});
+        return result;
+      }
+      async function signedPost(operation, data) {
+        const request = JSON.stringify(data);
+        const path = base + '/' + operation;
+        const {nonce} = await post(base + '/challenge', {key: bound.public.key, path});
+        if (typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(nonce)) throw Error('Invalid operation challenge.');
+        const now = nowSeconds();
+        const proof = await signJws({v: 1, nonce, iss: bound.public.sid, aud: policy.issuer,
+          method: 'POST', path, iat: now, exp: now + 60, request_sha256: await hash(request)}, bound.privateKey, PROOF_TYPE);
+        return post(path, {request, proof}, 'Codi ' + bound.token);
+      }
+      return Object.freeze({
+        accountId: bound.public.sub, sessionId: bound.public.sid, check,
+        approve({agentKey, scope, seconds}) {
+          return signedPost('create', {agent_key: publicJwk(agentKey), scope, seconds});
+        },
+        list() { return signedPost('list', {}); },
+        revoke(id) { return signedPost('revoke', {id}); },
+        async consume({confirmation, intent}) {
+          if (typeof confirmation !== 'string' || typeof intent !== 'string') throw Error('Exact grant and signed intent required.');
+          const result = await signedPost('consume', {confirmation, intent});
+          if (result.actor?.kind !== 'agent' || result.actor.accountId !== bound.public.sub || result.actor.sessionId !== bound.public.sid) {
+            throw Error('Operation authorization account binding changed.');
+          }
+          return result;
+        },
+      });
+    },
     async renew() {
       await ready; const previous = session, version = epoch;
       if (!previous) throw Error('Sign in is required.');
