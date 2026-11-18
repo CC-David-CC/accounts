@@ -1,5 +1,6 @@
 """Actual signed owner/agent proofs and synthetic account state; no real users."""
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 import secrets
 import tempfile
@@ -8,7 +9,7 @@ import uuid
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from webos_accounts import AccountsService, Config, Failure, jose
-from webos_accounts.delegation import Delegations, CREATE, LIST, REVOKE, AUTHORIZE, CONSUME, GRANT_TYPE
+from webos_accounts.delegation import Delegations, DelegationAuthority, CHALLENGE, CREATE, LIST, REVOKE, AUTHORIZE, CONSUME, GRANT_TYPE
 from webos_accounts.policy_service import set_disabled, reset_password
 from webos_accounts.service import PROOF_TYPE
 
@@ -31,10 +32,70 @@ class DelegationTests(unittest.TestCase):
 
     def envelope(self, path, data, key, sid, provider=None):
         challenge = (provider or self.core).challenge({'key': jose.public_jwk(key), 'path': self.issuer.base_path + path})
+        return self.signed_envelope(path, data, key, sid, challenge)
+
+    def signed_envelope(self, path, data, key, sid, challenge):
         raw = jose.dumps(data)
         proof = {'v': 1, 'iss': sid, 'aud': self.issuer.c.origin, 'method': 'POST', 'path': self.issuer.base_path + path,
                  'nonce': challenge['nonce'], 'request_sha256': jose.digest(raw), 'iat': self.time, 'exp': self.time + 60}
         return {'request': raw, 'proof': jose.sign(proof, key, PROOF_TYPE)}
+
+    def http(self, transport, path, data, **extra):
+        raw = data if isinstance(data, bytes) else jose.dumps(data).encode('utf-8')
+        headers = {}
+        env = {'PATH_INFO': path, 'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': 'application/json',
+               'CONTENT_LENGTH': str(len(raw)), 'HTTP_HOST': '127.0.0.1:18993', 'HTTP_ORIGIN': self.issuer.c.origin,
+               'REMOTE_ADDR': '127.0.0.1', 'wsgi.input': BytesIO(raw), **extra}
+        def start(status, fields):
+            headers.update(status=int(status.split()[0]), fields=dict(fields))
+        body = b''.join(transport(env, start))
+        self.assertEqual(headers['fields']['Cache-Control'], 'no-store')
+        return headers['status'], jose.loads(body)
+
+    def test_http_transport_binds_the_real_agent_intent_and_consumes_once(self):
+        transport = DelegationAuthority(self.issuer)
+        def prepare(path, body, key, sid):
+            status, challenge = self.http(transport, CHALLENGE, {'key': jose.public_jwk(key), 'path': self.issuer.base_path + path})
+            self.assertEqual(status, 200)
+            return self.signed_envelope(path, body, key, sid, challenge)
+
+        create = prepare(CREATE, {'agent_key': jose.public_jwk(self.agent_key), 'scope': self.scope, 'seconds': 60},
+                         self.owner_key, self.sid)
+        status, credential = self.http(transport, CREATE, create, HTTP_AUTHORIZATION=self.owner_auth)
+        self.assertEqual(status, 200)
+        intent = self.intent()
+        authorize = prepare(AUTHORIZE, {'intent': intent}, self.agent_key, credential['id'])
+        status, grant = self.http(transport, AUTHORIZE, authorize, HTTP_AUTHORIZATION='Agent ' + credential['agent_token'])
+        self.assertEqual(status, 200)
+        message = {'intent': intent, 'confirmation': grant['confirmation']}
+        status, result = self.http(transport, CONSUME, prepare(CONSUME, message, self.owner_key, self.sid),
+                                   HTTP_AUTHORIZATION=self.owner_auth)
+        self.assertEqual(status, 200)
+        self.assertEqual(result['intent'], jose.loads(intent))
+        self.assertEqual(result['actor']['id'], credential['id'])
+        self.assertNotIn(credential['agent_token'], jose.dumps(result))
+        status, _ = self.http(transport, CONSUME, prepare(CONSUME, message, self.owner_key, self.sid),
+                              HTTP_AUTHORIZATION=self.owner_auth)
+        self.assertEqual(status, 401)
+
+    def test_http_transport_rejects_invalid_envelopes_before_admission(self):
+        transport = DelegationAuthority(self.issuer)
+        valid = {'key': jose.public_jwk(self.agent_key), 'path': AUTHORIZE}
+        before = len(self.issuer.challenges)
+        rejected = [({'REQUEST_METHOD': 'GET'}, 405), ({'HTTP_ORIGIN': 'https://wrong.invalid'}, 403),
+                    ({'HTTP_HOST': 'wrong.invalid'}, 403), ({'QUERY_STRING': 'scope=extra'}, 400),
+                    ({'HTTP_TRANSFER_ENCODING': 'chunked'}, 400), ({'HTTP_CONTENT_ENCODING': 'gzip'}, 400),
+                    ({'CONTENT_TYPE': 'text/plain'}, 415), ({'CONTENT_LENGTH': '262145'}, 413),
+                    ({'CONTENT_LENGTH': '262144'}, 400)]
+        for headers, expected in rejected:
+            with self.subTest(headers=headers):
+                self.assertEqual(self.http(transport, CHALLENGE, valid, **headers)[0], expected)
+        self.assertEqual(self.http(transport, CHALLENGE, {'key': valid['key'], 'path': '/api/v1/auth'})[0], 400)
+        self.assertEqual(self.http(transport, CHALLENGE, b'{')[0], 400)
+        self.assertEqual(len(self.issuer.challenges), before)
+        status, config = self.http(transport, '/config.json', b'', REQUEST_METHOD='GET')
+        self.assertEqual(status, 200)
+        self.assertEqual(config['identity']['issuer'], self.issuer.c.origin)
 
     def call(self, path, data, *, key=None, sid=None, authorization=None):
         envelope = self.envelope(path, data, key or self.owner_key, sid or self.sid)

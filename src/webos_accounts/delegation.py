@@ -1,18 +1,19 @@
 """Proof-bound, short-lived operation delegation owned by Accounts.
 
-This core is not mounted by the development launcher. Consumers must enforce
-the returned scope against actual component resource metadata. Its grants are
-not file-gateway confirmations and cannot replace agent file authorization.
+Consumers must enforce the returned scope against actual component resource
+metadata. Its grants cannot replace agent file authorization.
 """
 import copy
 import math
 import re
 import secrets
 import uuid
+from urllib.parse import urlsplit
 
 from . import jose
 from .service import Failure
 
+CHALLENGE = '/api/v1/agents/challenge'
 CREATE = '/api/v1/agents/create'
 LIST = '/api/v1/agents/list'
 REVOKE = '/api/v1/agents/revoke'
@@ -20,6 +21,7 @@ AUTHORIZE = '/api/v1/agents/authorize'
 CONSUME = '/api/v1/agents/consume'
 PATHS = frozenset((CREATE, LIST, REVOKE, AUTHORIZE, CONSUME))
 GRANT_TYPE = 'webos-agent-operation+jwt'
+MAX_TRANSPORT_BYTES = 262144
 
 
 def exact(value, keys):
@@ -157,7 +159,7 @@ class Delegations:
         if path not in PATHS:
             raise Failure(404, 'Unknown delegation operation')
         try:
-            if not isinstance(envelope, dict) or not isinstance(envelope.get('request'), str) or len(envelope['request'].encode('utf-8')) > 262144:
+            if not isinstance(envelope, dict) or not isinstance(envelope.get('request'), str) or len(envelope['request'].encode('utf-8')) > MAX_TRANSPORT_BYTES:
                 raise Failure(400, 'Bounded delegation envelope required')
             data, key, proof = self.issuer.consume_proof(envelope, path)
             with self.issuer.lock:
@@ -249,3 +251,47 @@ class Delegations:
         del self.grants[claims['jti']]
         return {'actor': {'kind': 'agent', 'id': record['id'], 'accountId': record['owner_sub'], 'sessionId': record['owner_sid']},
                 'scope': copy.deepcopy(record['scope']), 'intent': intent, 'expires_at': claims['exp']}
+
+
+class DelegationAuthority:
+    """HTTP boundary for operation grants. Desktop owns application dispatch."""
+
+    def __init__(self, issuer, application=None):
+        self.issuer = issuer
+        self.application = issuer if application is None else application
+        self.delegations = Delegations(issuer)
+
+    def __call__(self, env, start):
+        path = env.get('PATH_INFO', '/')
+        if path != CHALLENGE and path not in PATHS:
+            return self.application(env, start)
+        issuer = self.issuer
+        try:
+            if env.get('HTTP_HOST') != urlsplit(issuer.c.origin).netloc or env.get('HTTP_ORIGIN') != issuer.c.origin:
+                raise Failure(403, 'Unexpected operation origin')
+            if env.get('REQUEST_METHOD') != 'POST':
+                raise Failure(405, 'POST required')
+            if env.get('QUERY_STRING') or env.get('HTTP_TRANSFER_ENCODING') or env.get('HTTP_CONTENT_ENCODING'):
+                raise Failure(400, 'Plain JSON request without query or transfer encoding required')
+            if env.get('CONTENT_TYPE', '').split(';')[0].strip() != 'application/json':
+                raise Failure(415, 'JSON required')
+            length = env.get('CONTENT_LENGTH', '')
+            if not length.isascii() or not length.isdecimal() or len(length) > 6 or not 0 < int(length) <= MAX_TRANSPORT_BYTES:
+                raise Failure(413, 'Bounded operation request required')
+            issuer.throttle('agent-transport-peer:' + env.get('REMOTE_ADDR', 'unknown'))
+            issuer.throttle('agent-transport-global', limit=20 * issuer.c.rate_per_minute)
+            raw = env['wsgi.input'].read(int(length))
+            if len(raw) != int(length):
+                raise Failure(400, 'Truncated operation request')
+            request = jose.loads(raw)
+            if path == CHALLENGE:
+                result = self.delegations.challenge(request)
+            else:
+                result = self.delegations.dispatch(path, request, env.get('HTTP_AUTHORIZATION', ''))
+            return issuer.json_response(start, 200, result)
+        except Failure as error:
+            return issuer.json_response(start, error.status, {'error': error.message})
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+            return issuer.json_response(start, 400, {'error': 'Invalid operation request'})
+        except Exception:
+            return issuer.json_response(start, 500, {'error': 'Operation authorization unavailable'})

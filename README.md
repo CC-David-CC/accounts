@@ -8,10 +8,13 @@ Install into a separate development environment with `uv pip install -e .`. Run 
 
 The public browser package `@webos/accounts` exposes `createAccountsClient`. Its closure owns credentials; `inspect()` returns public session state. `createFileAuthority()` returns an epoch-bound human file capability that signs one-use request grants without exporting account tokens or private keys. This is not agent delegation. The Python `webos_accounts.file_authority.FileAuthority` issues and verifies the corresponding grants using the public Runtime wire contract. Storage consumes these public interfaces, never private signing keys or session maps. Real account data and credentials must stay outside this repository and public roots. Use only explicit private state directories with the loopback development launcher.
 
-## Scoped delegation core — not enabled in the launcher
+## Scoped operation delegation
 
-`webos_accounts.delegation.Delegations` is an optional Accounts-owned policy core.
-It is not mounted by the current server and does not enable a remote agent API.
+`webos_accounts.delegation.Delegations` owns the operation policy.
+`DelegationAuthority` wraps it with exact, same-origin JSON POST routes under
+`/api/v1/agents/`. It caps bodies, applies issuer admission budgets and
+returns uncached responses. Hosts select this wrapper explicitly. The current
+viewer launcher and deployed service use their existing authorities.
 Its challenge/dispatch methods verify actual signed one-use owner or agent
 proofs. Creating a delegation requires a registered owner's current session/key;
 the independent agent public key is bound to a fresh secret returned only by
@@ -31,9 +34,8 @@ Consumers must enforce the returned scope against **actual component resource
 metadata**, not merely the resources declared by an agent. Returned actor fields
 are metadata, not caller credentials. A browser integration needs an unforgeable
 invocation context bound to the admitted intent and current account epoch.
-No HTTP adapter, owner-consent UI, authenticated agent transport or agent file
-authority is installed here. Any future adapter must enforce origin/method,
-bounded bodies and admission budgets. User-presence steps stay user-controlled.
+Desktop still needs consent presentation, live command dispatch and an
+agent file authority. User-presence steps stay user-controlled.
 
 These operation grants have a distinct type/audience and are rejected as
 file-gateway confirmations. Never use the existing human file authority to
@@ -42,8 +44,9 @@ ownership/provenance tests remain required before enabling agents.
 
 Run `python -m unittest discover -s tests -v` in the component backend environment.
 The delegation tests use real generated signing keys and synthetic retained
-account state, including concurrent consumption and existing account-policy
-revocation. They do not qualify end-to-end agent operation of the desktop.
+account state. They verify the HTTP boundary, exact-intent authorization,
+single-use and concurrent consumption, and existing account-policy revocation.
+End-to-end agent operations require a separate test with a live Desktop.
 
 ## Retained identity core and current policy checks
 
