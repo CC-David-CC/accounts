@@ -3,6 +3,7 @@ import {hash, signJws, inspectJws, verifyJws, sameKey, publicJwk, validateTimes,
 import {verifyIdentity, PROOF_TYPE} from './identity.mjs';
 import {beginSession, logoutSession, renewSession, resumeSession} from './identity.mjs';
 import {createSessionStore} from './session-store.mjs';
+import {guestNetworkAuthority} from './guest-network.mjs';
 
 /** One account authority per runtime; only this closure holds session credentials. */
 export function createAccountsClient({configUrl = '/config.json', persistSession = false} = {}) {
@@ -113,6 +114,15 @@ export function createAccountsClient({configUrl = '/config.json', persistSession
       if (!previous) return {status: 'signed-out'};
       try { await logoutSession(config, previous); return {status: 'signed-out'}; }
       catch { throw Object.assign(Error('Signed out on this device; server revocation could not be confirmed.'), {outcome: 'unknown'}); }
+    },
+    createGuestNetworkAuthority() {
+      if (!session || phase !== 'authenticated') return null;
+      const bound = session, version = epoch;
+      return guestNetworkAuthority(config, bound, () => {
+        if (session !== bound || epoch !== version || phase !== 'authenticated') {
+          throw new DOMException('Account changed.', 'AbortError');
+        }
+      });
     },
     createFileAuthority() {
       if (!session || phase !== 'authenticated') throw Error('Sign in to access account files.');

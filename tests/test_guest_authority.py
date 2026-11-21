@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from webos_accounts import AccountsService, Config, jose
-from webos_accounts.guest_authority import AUTHORIZE, CHALLENGE, GRANT_TYPE, GuestAuthority
+from webos_accounts.guest_authority import AUTHORIZE, CHALLENGE, GRANT_TYPE, STATUS, GuestAuthority
 from webos_accounts.service import PROOF_TYPE
 
 
@@ -52,9 +52,9 @@ class GuestAuthorityTest(unittest.TestCase):
         value = jose.loads(b''.join(self.transport(env, start)))
         return result['status'], value
 
-    def envelope(self, session, data, key=None):
+    def envelope(self, session, data, key=None, endpoint=AUTHORIZE):
         key = key or self.key
-        path = self.issuer.base_path + AUTHORIZE
+        path = self.issuer.base_path + endpoint
         status, challenge = self.request(CHALLENGE, {'path': path, 'key': jose.public_jwk(key)})
         self.assertEqual(status, 200)
         body = jose.dumps(data)
@@ -115,6 +115,27 @@ class GuestAuthorityTest(unittest.TestCase):
         self.issuer.continue_session({}, self.public, {'iss': identity['sid']}, '/api/v1/logout',
                                      'Codi ' + owner['session_token'])
         self.assertEqual(self.wire(owner)[-1][0], 401)
+
+    def test_status_binds_a_live_session_and_creates_no_wire_grant(self):
+        dedicated = self.enter('networkfixture')
+        ordinary = self.enter('ordinaryfixture')
+        anonymous = self.enter()
+        self.grants[dedicated['identity']['sub']] = self.now + 15
+        self.grants[anonymous['identity']['sub']] = self.now + 15
+        data = {'policy_sha256': self.policy}
+
+        def check(session):
+            proof = self.envelope(session, data, endpoint=STATUS)
+            return self.request(STATUS, proof, HTTP_AUTHORIZATION='Codi ' + session['session_token'])
+
+        self.assertEqual(check(dedicated), (200, {'policy_sha256': self.policy, 'expires_at': self.now + 15}))
+        self.assertEqual(check(ordinary)[0], 403)
+        self.assertEqual(check(anonymous)[0], 403)
+        wrong_path = self.envelope(dedicated, data, endpoint=STATUS)
+        self.assertEqual(self.request(AUTHORIZE, wrong_path,
+                       HTTP_AUTHORIZATION='Codi ' + dedicated['session_token'])[0], 401)
+        self.now += 15
+        self.assertEqual(check(dedicated)[0], 403)
 
 
 if __name__ == '__main__':
