@@ -78,6 +78,7 @@ export function guestNetworkAuthority(config, session, check) {
 
   return Object.freeze({
     relayPath, policyHash, check,
+    statusSetsRelayCookie: network.relayAdmission === 'signed-status-cookie',
     async status({signal} = {}) {
       try {
         const result = await operation('status', {policy_sha256: policyHash}, signal);
