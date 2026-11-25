@@ -76,6 +76,15 @@ SCHEMA = (
        WHEN EXISTS (SELECT 1 FROM am_reserved WHERE name=NEW.username)
        BEGIN SELECT RAISE(ABORT,'reserved WebOS username'); END""",
 )
+MAIL_PROJECTION_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS am_mail_projected "
+    "(subject TEXT PRIMARY KEY NOT NULL REFERENCES am_mail_binding(subject) ON DELETE CASCADE)",
+    "CREATE TABLE IF NOT EXISTS am_applied_mail "
+    "(subject TEXT NOT NULL REFERENCES am_mail_projected(subject) ON DELETE CASCADE, "
+    "setting TEXT NOT NULL REFERENCES am_mail_setting(name), PRIMARY KEY(subject,setting)) WITHOUT ROWID",
+)
+MAIL_PROJECTION_TABLES = {"am_mail_projected", "am_applied_mail"}
+
 TABLES = {
     statement.split()[2] for statement in SCHEMA if statement.startswith("CREATE TABLE")
 }
@@ -97,6 +106,12 @@ def transaction(path, write=True):
         with db:
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield db
+
+
+def migrate_mail_projection(db):
+    """Add readback tables without changing existing requested grants."""
+    for statement in MAIL_PROJECTION_SCHEMA:
+        db.execute(statement)
 
 
 def audit(db, actor, target, action, outcome="ok"):
@@ -202,10 +217,11 @@ def require_password(value):
 
 
 class AccountManagement:
-    def __init__(self, issuer, chat=None):
+    def __init__(self, issuer, chat=None, mail=None):
         self.issuer = issuer
         self.path = issuer.db
         self.chat = chat
+        self.mail = mail
 
     @contextmanager
     def password_slot(self):
@@ -259,7 +275,7 @@ class AccountManagement:
 
     def target_view(self, db, target):
         user = account(db, target)
-        return {
+        value = {
             "subject": target,
             "username": user["username"],
             "suspended": bool(user["disabled"]),
@@ -276,6 +292,10 @@ class AccountManagement:
                 )
             ],
         }
+
+        if self.mail:
+            value.update(self.mail.view(db, target))
+        return value
 
     def dispatch(self, principal, req):
         op = req.get("operation")
