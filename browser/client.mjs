@@ -113,7 +113,10 @@ export function createAccountsClient({configUrl = '/config.json', persistSession
       ++epoch; session = null; phase = 'signed-out'; notify();
       if (!previous) return {status: 'signed-out'};
       try { await logoutSession(config, previous); return {status: 'signed-out'}; }
-      catch { throw Object.assign(Error('Signed out on this device; server revocation could not be confirmed.'), {outcome: 'unknown'}); }
+      catch (error) {
+        if (error.status === 401 && error.message === 'Session revoked') return {status: 'signed-out'};
+        throw Object.assign(Error('Signed out on this device; server revocation could not be confirmed.'), {outcome: 'unknown'});
+      }
     },
     createGuestNetworkAuthority() {
       if (!session || phase !== 'authenticated') return null;
