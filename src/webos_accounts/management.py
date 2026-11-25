@@ -84,6 +84,11 @@ MAIL_PROJECTION_SCHEMA = (
     "setting TEXT NOT NULL REFERENCES am_mail_setting(name), PRIMARY KEY(subject,setting)) WITHOUT ROWID",
 )
 MAIL_PROJECTION_TABLES = {"am_mail_projected", "am_applied_mail"}
+MAIL_CREATION_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS am_mail_creating "
+    "(subject TEXT PRIMARY KEY NOT NULL REFERENCES accounts(subject) ON DELETE CASCADE)"
+)
+
 
 TABLES = {
     statement.split()[2] for statement in SCHEMA if statement.startswith("CREATE TABLE")
